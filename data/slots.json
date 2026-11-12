@@ -1,0 +1,60 @@
+{
+  "updated": "2026-11-12",
+  "slots": [
+    {"id": "gates-olympus", "name": "Gates of Olympus", "provider": "Pragmatic Play", "rtp": 96.50, "vol": "High", "alt": [95.51, 94.50, 94.05], "conf": "multi", "note": "Some sources label the volatility Very High."},
+    {"id": "gates-olympus-1k", "name": "Gates of Olympus 1000", "provider": "Pragmatic Play", "rtp": 96.50, "vol": "Very High", "conf": "multi"},
+    {"id": "sweet-bonanza", "name": "Sweet Bonanza", "provider": "Pragmatic Play", "rtp": 96.49, "vol": "High", "conf": "conflict", "range": [96.48, 96.51], "note": "Sources list 96.48-96.51%."},
+    {"id": "sweet-bonanza-1k", "name": "Sweet Bonanza 1000", "provider": "Pragmatic Play", "rtp": 96.53, "vol": "High", "conf": "multi"},
+    {"id": "starlight-princess", "name": "Starlight Princess", "provider": "Pragmatic Play", "rtp": 96.50, "vol": "High", "alt": [95.51, 94.50], "conf": "multi"},
+    {"id": "starlight-princess-1k", "name": "Starlight Princess 1000", "provider": "Pragmatic Play", "rtp": 96.50, "vol": "Very High", "conf": "multi"},
+    {"id": "sugar-rush", "name": "Sugar Rush", "provider": "Pragmatic Play", "rtp": 96.50, "vol": "High", "conf": "multi"},
+    {"id": "sugar-rush-1k", "name": "Sugar Rush 1000", "provider": "Pragmatic Play", "rtp": 96.53, "vol": "High", "conf": "multi", "note": "Some sources label the volatility Very High; one source lists 97.5%."},
+    {"id": "big-bass-bonanza", "name": "Big Bass Bonanza", "provider": "Pragmatic Play", "rtp": 96.71, "vol": "Medium-High", "alt": [95.67, 94.50, 94.02], "conf": "multi", "note": "Volatility is listed anywhere from Medium to High."},
+    {"id": "fruit-party", "name": "Fruit Party", "provider": "Pragmatic Play", "rtp": 96.47, "vol": null, "conf": "multi"},
+    {"id": "dog-house-mw", "name": "The Dog House Megaways", "provider": "Pragmatic Play", "rtp": 96.55, "vol": "High", "conf": "multi", "note": "Some sources label the volatility Very High."},
+    {"id": "great-rhino-mw", "name": "Great Rhino Megaways", "provider": "Pragmatic Play", "rtp": 96.58, "vol": "High", "conf": "conflict", "range": [96.50, 97.00], "note": "Sources list 96.50-97.00%."},
+    {"id": "buffalo-king-mw", "name": "Buffalo King Megaways", "provider": "Pragmatic Play", "rtp": 96.52, "vol": "High", "alt": [95.55, 94.51], "conf": "multi"},
+    {"id": "wolf-gold", "name": "Wolf Gold", "provider": "Pragmatic Play", "rtp": 96.01, "vol": "Medium", "conf": "multi", "note": "Listed as 96.00% or 96.01%."},
+
+    {"id": "wanted-dead", "name": "Wanted Dead or a Wild", "provider": "Hacksaw Gaming", "rtp": 96.38, "vol": "High", "alt": [94.55, 92.33], "conf": "multi"},
+    {"id": "le-bandit", "name": "Le Bandit", "provider": "Hacksaw Gaming", "rtp": 96.34, "vol": "Medium", "conf": "single"},
+    {"id": "le-fisherman", "name": "Le Fisherman", "provider": "Hacksaw Gaming", "rtp": 96.33, "vol": "Medium", "conf": "single"},
+    {"id": "chaos-crew-2", "name": "Chaos Crew 2", "provider": "Hacksaw Gaming", "rtp": 96.27, "vol": "High", "conf": "conflict", "range": [96.00, 96.27], "note": "Sources list 96.00-96.27%."},
+    {"id": "hand-of-anubis", "name": "Hand of Anubis", "provider": "Hacksaw Gaming", "rtp": 96.24, "vol": "High", "conf": "single"},
+
+    {"id": "book-of-dead", "name": "Book of Dead", "provider": "Play'n GO", "rtp": 96.21, "vol": "High", "alt": [96.00, 94.00, 91.00, 87.00, 84.00], "conf": "multi", "note": "Some regulated markets list 94.20%."},
+    {"id": "reactoonz", "name": "Reactoonz", "provider": "Play'n GO", "rtp": 96.51, "vol": "High", "conf": "multi"},
+    {"id": "legacy-of-dead", "name": "Legacy of Dead", "provider": "Play'n GO", "rtp": 96.58, "vol": "High", "conf": "single"},
+    {"id": "rise-of-olympus", "name": "Rise of Olympus", "provider": "Play'n GO", "rtp": 96.50, "vol": "High", "conf": "single"},
+
+    {"id": "starburst", "name": "Starburst", "provider": "NetEnt", "rtp": 96.09, "vol": "Low", "conf": "multi", "note": "Listed as 96.09% or 96.10%. Configurable RTP."},
+    {"id": "gonzos-quest", "name": "Gonzo's Quest", "provider": "NetEnt", "rtp": 95.97, "vol": "Medium-High", "conf": "multi", "note": "Volatility is listed as Medium or Medium-High."},
+    {"id": "dead-or-alive-2", "name": "Dead or Alive 2", "provider": "NetEnt", "rtp": 96.80, "vol": "Very High", "conf": "multi", "note": "Some sources list 96.82% or 96.94%; volatility is listed as High to Very High."},
+    {"id": "divine-fortune", "name": "Divine Fortune", "provider": "NetEnt", "rtp": 96.59, "vol": "Medium", "conf": "multi", "jackpot": true, "note": "Progressive jackpot game."},
+    {"id": "blood-suckers", "name": "Blood Suckers", "provider": "NetEnt", "rtp": 98.00, "vol": "Low-Medium", "conf": "multi", "note": "Check the casino's configuration; lower builds exist."},
+    {"id": "mega-fortune", "name": "Mega Fortune", "provider": "NetEnt", "rtp": 96.60, "vol": "Low-Medium", "conf": "multi", "jackpot": true, "note": "Progressive jackpot game."},
+
+    {"id": "gonzos-quest-mw", "name": "Gonzo's Quest Megaways", "provider": "Red Tiger", "rtp": 95.77, "vol": null, "conf": "multi"},
+
+    {"id": "mental", "name": "Mental", "provider": "Nolimit City", "rtp": 96.08, "vol": "Very High", "conf": "multi"},
+    {"id": "tombstone-rip", "name": "Tombstone RIP", "provider": "Nolimit City", "rtp": 96.08, "vol": "Very High", "conf": "single", "note": "One source labels the volatility High."},
+    {"id": "san-quentin-2", "name": "San Quentin 2: Death Row", "provider": "Nolimit City", "rtp": 96.13, "vol": "Very High", "conf": "single", "note": "Listed as Extreme volatility."},
+    {"id": "book-of-shadows", "name": "Book of Shadows", "provider": "Nolimit City", "rtp": 96.19, "vol": null, "conf": "single"},
+
+    {"id": "razor-shark", "name": "Razor Shark", "provider": "Push Gaming", "rtp": 96.70, "vol": "High", "alt": [95.05, 94.06], "conf": "multi", "note": "Much lower builds are reported in some regulated markets."},
+    {"id": "jammin-jars", "name": "Jammin' Jars", "provider": "Push Gaming", "rtp": 96.83, "vol": "High", "conf": "multi"},
+    {"id": "jammin-jars-2", "name": "Jammin' Jars 2", "provider": "Push Gaming", "rtp": 96.40, "vol": "High", "conf": "multi", "note": "One source lists 96.50%."},
+    {"id": "big-bamboo", "name": "Big Bamboo", "provider": "Push Gaming", "rtp": 96.13, "vol": "High", "conf": "multi", "note": "Volatility is listed as High or Very High."},
+    {"id": "tiki-tumble", "name": "Tiki Tumble", "provider": "Push Gaming", "rtp": 96.49, "vol": "High", "conf": "single"},
+
+    {"id": "money-train-2", "name": "Money Train 2", "provider": "Relax Gaming", "rtp": 96.40, "vol": "Very High", "conf": "single"},
+    {"id": "money-train-3", "name": "Money Train 3", "provider": "Relax Gaming", "rtp": 96.10, "vol": "Very High", "conf": "single", "note": "Buy-feature RTP is listed separately and is higher."},
+    {"id": "money-train-4", "name": "Money Train 4", "provider": "Relax Gaming", "rtp": 96.10, "vol": "Very High", "conf": "single"},
+
+    {"id": "bonanza-mw", "name": "Bonanza Megaways", "provider": "Big Time Gaming", "rtp": 96.00, "vol": "High", "conf": "multi"},
+    {"id": "white-rabbit-mw", "name": "White Rabbit Megaways", "provider": "Big Time Gaming", "rtp": 97.24, "vol": "High", "conf": "conflict", "range": [96.30, 97.77], "note": "Sources list 96.30-97.77%; the RTP is configurable."},
+    {"id": "danger-hv", "name": "Danger High Voltage", "provider": "Big Time Gaming", "rtp": 96.22, "vol": "Medium-High", "conf": "single"},
+
+    {"id": "mega-moolah", "name": "Mega Moolah", "provider": "Microgaming", "rtp": 88.12, "vol": "High", "conf": "multi", "jackpot": true, "note": "Progressive jackpot game. The jackpot pool is funded out of the RTP, which is why it is so low. Listed as 88% or 88.12%."}
+  ]
+}
