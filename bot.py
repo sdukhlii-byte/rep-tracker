@@ -1,4 +1,4 @@
-"""Telegram channel publisher with bundled banners. Python 3.11+, aiogram 3."""
+"""Telegram push-broadcast bot: sends banner posts with a Mini App button to subscribers. Python 3.11+, aiogram 3."""
 import asyncio
 import copy
 import html
@@ -11,8 +11,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
-from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import ChatMemberUpdated, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -47,7 +48,6 @@ def parse_post_times(raw):
 
 
 BOT_TOKEN = env('BOT_TOKEN', required=True)
-CHANNEL_ID = env('CHANNEL_ID', required=True)
 try:
     ADMIN_IDS = {int(v) for v in env('ADMIN_IDS', required=True).split(',') if v.strip()}
 except ValueError:
@@ -57,6 +57,8 @@ MINIAPP_URL = env('MINIAPP_URL') or env('PLAY_URL')
 if not MINIAPP_URL:
     raise RuntimeError('Переменная окружения MINIAPP_URL не задана (Railway → Variables)')
 BUTTON_TEXT = env('BUTTON_TEXT', '🎰 PLAY NOW!')
+WELCOME_TEXT = env('WELCOME_TEXT', '✅ You are subscribed! The top slots by RTP will arrive right here. Send /stop to unsubscribe.')
+STOP_TEXT = env('STOP_TEXT', '⏸ Unsubscribed. Send /start to subscribe again.')
 TZ = ZoneInfo(env('TIMEZONE', 'Europe/Madrid'))
 POST_TIMES = parse_post_times(env('POST_TIMES', '10:00,15:00'))
 DATA_FILE = Path(env('DATA_FILE', str(ROOT / 'data.json')))
@@ -80,6 +82,7 @@ PRESETS = [
 
 DEFAULT = {
     'next_index': 0,
+    'subscribers': [],
     'auto': False,
     'posted_minutes': [],
     'custom_image': '',
@@ -165,43 +168,113 @@ def local_file(img):
     except (OSError, ValueError):  # file_id / long URL can't be a path
         return False
 
-async def send_post(bot, target, selection):
+photo_cache = {}  # banner -> Telegram file_id, so each banner is uploaded once, not once per subscriber
+broadcast_lock = asyncio.Lock()
+BROADCAST_DELAY = 0.05  # ~20 msgs/sec, safely below Telegram's ~30/sec limit
+
+async def send_post(bot, chat_id, selection):
     _, games, img = selection
     caption = format_caption(games)
     if img:
-        photo = FSInputFile(img) if local_file(img) else img
-        return await bot.send_photo(target, photo, caption=caption, parse_mode='HTML', reply_markup=keyboard())
-    return await bot.send_message(target, caption, parse_mode='HTML', reply_markup=keyboard())
+        cached = photo_cache.get(img)
+        photo = cached or (FSInputFile(img) if local_file(img) else img)
+        msg = await bot.send_photo(chat_id, photo, caption=caption, parse_mode='HTML', reply_markup=keyboard())
+        if not cached and msg.photo:
+            photo_cache[img] = msg.photo[-1].file_id
+        return msg
+    return await bot.send_message(chat_id, caption, parse_mode='HTML', reply_markup=keyboard())
 
 def advance(selection):
     if isinstance(selection[0], int):
         state['next_index'] = (selection[0] + 1) % len(PRESETS)
         save()
 
-async def try_publish(bot, target, selection):
-    await send_post(bot, target, selection)
-    advance(selection)
+def subscribe(user_id):
+    if user_id not in state['subscribers']:
+        state['subscribers'].append(user_id)
+        save()
+
+def unsubscribe(user_id):
+    if user_id in state['subscribers']:
+        state['subscribers'].remove(user_id)
+        save()
+
+async def broadcast(bot, selection):
+    """Push one post to every subscriber. Returns (sent, gone, failed)."""
+    async with broadcast_lock:
+        sent = gone = failed = streak = 0
+        for uid in list(state['subscribers']):
+            try:
+                try:
+                    await send_post(bot, uid, selection)
+                except TelegramRetryAfter as exc:
+                    await asyncio.sleep(exc.retry_after + 1)
+                    await send_post(bot, uid, selection)
+                sent += 1
+                streak = 0
+            except TelegramForbiddenError:  # user blocked the bot / account deleted
+                unsubscribe(uid)
+                gone += 1
+            except TelegramBadRequest as exc:
+                if 'chat not found' in str(exc).lower():
+                    unsubscribe(uid)
+                    gone += 1
+                else:
+                    failed += 1
+                    streak += 1
+                    logging.error('Send to %s failed: %s', uid, exc)
+            except Exception:
+                failed += 1
+                streak += 1
+                logging.exception('Send to %s failed', uid)
+            if streak >= 5:  # same error for everyone (bad banner / URL) -> stop instead of spamming logs
+                logging.error('Broadcast aborted after %s consecutive errors', streak)
+                break
+            await asyncio.sleep(BROADCAST_DELAY)
+        if sent:
+            advance(selection)
+        return sent, gone, failed
 
 dp = Dispatcher()
 
 @dp.message(CommandStart())
 async def start(message: Message):
+    if message.chat.type != 'private' or not message.from_user:
+        return
+    subscribe(message.from_user.id)
+    await message.answer(WELCOME_TEXT)
     if not is_admin(message):
-        await message.answer('Публикации доступны в нашем канале.')
         return
     await message.answer(
-        '🎰 Управление публикациями\n\n'
+        '🎰 Управление рассылкой (ты тоже подписан, посты придут и тебе)\n\n'
         '/posts — все 11 готовых баннеров\n'
-        '/preview — предпросмотр следующего\n'
+        '/preview — предпросмотр следующего (только тебе)\n'
         '/preview 11 — предпросмотр №11\n'
-        '/publish — опубликовать следующий и перейти к следующему\n'
-        '/publish 11 — опубликовать №11\n'
+        '/publish — разослать следующий ВСЕМ подписчикам и перейти к следующему\n'
+        '/publish 11 — разослать №11\n'
         '/setgames — настроить свои 3 игры\n'
         '/setimage — установить своё изображение\n'
         '/preview custom — посмотреть свой пост\n'
-        '/publish custom — отправить свой пост\n'
+        '/publish custom — разослать свой пост\n'
         '/autoon и /autooff — включить/выключить расписание\n'
-        '/status — настройки')
+        '/status — настройки и число подписчиков')
+
+@dp.message(Command('stop'))
+async def stop(message: Message):
+    if message.chat.type != 'private' or not message.from_user:
+        return
+    unsubscribe(message.from_user.id)
+    await message.answer(STOP_TEXT)
+
+@dp.my_chat_member()
+async def on_member_update(event: ChatMemberUpdated):
+    # Telegram tells us when a user blocks / unblocks the bot in a private chat.
+    if event.chat.type != 'private':
+        return
+    if event.new_chat_member.status in ('kicked', 'left'):
+        unsubscribe(event.chat.id)
+    elif event.new_chat_member.status == 'member':
+        subscribe(event.chat.id)
 
 @dp.message(Command('posts'))
 async def posts(message: Message):
@@ -219,8 +292,10 @@ async def preview_or_publish(message: Message, bot: Bot):
         if cmd == '/preview':
             await send_post(bot, message.chat.id, selection)
         else:
-            await try_publish(bot, CHANNEL_ID, selection)
-            await message.answer('✅ Опубликовано в канал.')
+            total = len(state['subscribers'])
+            await message.answer(f'📤 Рассылка запущена, подписчиков: {total}')
+            sent, gone, failed = await broadcast(bot, selection)
+            await message.answer(f'✅ Доставлено: {sent}\nОтписались/заблокировали бота: {gone}\nОшибок: {failed}')
     except Exception as exc:
         logging.exception('Publish / preview failed')
         await message.answer('Ошибка: ' + str(exc)[:400])
@@ -278,12 +353,12 @@ async def auto_handler(message: Message):
     if not is_admin(message): return
     state['auto'] = message.text.split()[0].split('@')[0].lower() == '/autoon'
     save()
-    await message.answer(('✅ Автопостинг активен: ' + ', '.join(POST_TIMES) + f' ({TZ.key})') if state['auto'] else '⏸ Автопостинг отключён')
+    await message.answer(('✅ Авторассылка активна: ' + ', '.join(POST_TIMES) + f' ({TZ.key})') if state['auto'] else '⏸ Авторассылка отключена')
 
 @dp.message(Command('status'))
 async def status(message: Message):
     if not is_admin(message): return
-    await message.answer(f'Канал: {CHANNEL_ID}\nКнопка → {MINIAPP_URL}\nАвтопостинг: {"ON" if state["auto"] else "OFF"}\n'
+    await message.answer(f'Подписчиков: {len(state["subscribers"])}\nКнопка → {MINIAPP_URL}\nАвторассылка: {"ON" if state["auto"] else "OFF"}\n'
                          f'Часы: {", ".join(POST_TIMES)} ({TZ.key})\n'
                          f'Следующий баннер: {state["next_index"] % len(PRESETS) + 1}\n'
                          f'Собственная картинка: {"да" if state["custom_image"] else "нет"}')
@@ -298,13 +373,13 @@ async def scheduler(bot: Bot):
                 state['posted_minutes'].append(key)
                 state['posted_minutes'] = state['posted_minutes'][-60:]
                 save()
-                await try_publish(bot, CHANNEL_ID, resolve_selection(''))
-                logging.info('Published scheduled post: %s', key)
+                sent, gone, failed = await broadcast(bot, resolve_selection(''))
+                logging.info('Scheduled broadcast %s: sent=%s gone=%s failed=%s', key, sent, gone, failed)
         except asyncio.CancelledError:
             raise
         except Exception:
             # Never let the scheduler die silently (e.g. disk error or Telegram error).
-            logging.exception('Scheduled post failed')
+            logging.exception('Scheduled broadcast failed')
         await asyncio.sleep(15)
 
 async def main():
