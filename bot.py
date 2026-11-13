@@ -1,4 +1,5 @@
-"""Telegram push-broadcast bot: sends banner posts with a Mini App button to subscribers. Python 3.11+, aiogram 3."""
+"""Telegram drip-push bot: every subscriber gets banner posts (with a Mini App button)
+on a personal schedule counted from the moment they pressed /start. Python 3.11+, aiogram 3."""
 import asyncio
 import copy
 import html
@@ -6,9 +7,8 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
+import time
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
@@ -33,18 +33,30 @@ def env(name, default=None, required=False):
     return value
 
 
-def parse_post_times(raw):
-    """'9:00, 15:30' -> ['09:00', '15:30']; fails loudly on a bad value."""
-    times = []
+def parse_delays(raw):
+    """'15m,12h,1d' -> [900, 43200, 86400] seconds. Fails loudly on a bad value."""
+    units = {'m': 60, 'h': 3600, 'd': 86400}
+    out = []
     for part in raw.split(','):
-        part = part.strip()
+        part = part.strip().lower()
         if not part:
             continue
-        m = re.fullmatch(r'(\d{1,2}):(\d{2})', part)
-        if not m or int(m[1]) > 23 or int(m[2]) > 59:
-            raise RuntimeError(f'POST_TIMES: неверное время "{part}", нужен формат ЧЧ:ММ')
-        times.append(f'{int(m[1]):02d}:{m[2]}')
-    return times
+        m = re.fullmatch(r'(\d+(?:\.\d+)?)\s*([mhd])', part)
+        if not m or float(m[1]) <= 0:
+            raise RuntimeError(f'DRIP_DELAYS: неверное значение "{part}", примеры: 15m, 12h, 2d')
+        out.append(int(float(m[1]) * units[m[2]]))
+    if not out:
+        raise RuntimeError('DRIP_DELAYS пуст')
+    return out
+
+
+def human(seconds):
+    seconds = max(0, int(seconds))
+    if seconds < 3600:
+        return f'{max(1, round(seconds / 60))} мин'
+    if seconds < 86400:
+        return f'{seconds / 3600:.1f} ч'.replace('.0 ', ' ')
+    return f'{seconds / 86400:.1f} дн'.replace('.0 ', ' ')
 
 
 BOT_TOKEN = env('BOT_TOKEN', required=True)
@@ -59,9 +71,15 @@ if not MINIAPP_URL:
 BUTTON_TEXT = env('BUTTON_TEXT', '🎰 PLAY NOW!')
 WELCOME_TEXT = env('WELCOME_TEXT', '✅ You are subscribed! The top slots by RTP will arrive right here. Send /stop to unsubscribe.')
 STOP_TEXT = env('STOP_TEXT', '⏸ Unsubscribed. Send /start to subscribe again.')
-TZ = ZoneInfo(env('TIMEZONE', 'Europe/Madrid'))
-POST_TIMES = parse_post_times(env('POST_TIMES', '10:00,15:00'))
+# Pause before the 1st push (counted from /start), then the pause after each push before the next one.
+# One entry = one push. Posts go in the order 1..11 and cycle if there are more than 11 entries.
+DRIP_DELAYS = parse_delays(env('DRIP_DELAYS', '15m,2h,5h,12h,20h,1d,2d,3d,4d,5d,7d'))
 DATA_FILE = Path(env('DATA_FILE', str(ROOT / 'data.json')))
+
+RETRY_SECONDS = 600   # retry a failed send after 10 minutes
+MAX_FAILS = 5         # after this many failures in a row for one user, skip that post
+BROADCAST_DELAY = 0.05  # ~20 msgs/sec, safely below Telegram's ~30/sec limit
+TICK_SECONDS = 20
 
 # Artwork is supplied by the project owner. Each preset's game names match its banner.
 # RTP values are editorial placeholders, not a casino feed or a prediction of wins.
@@ -81,10 +99,9 @@ PRESETS = [
 ]
 
 DEFAULT = {
-    'next_index': 0,
-    'subscribers': [],
-    'auto': False,
-    'posted_minutes': [],
+    # user_id (as str) -> {'joined': ts, 'step': pushes already sent, 'next_at': ts or None, 'fails': n}
+    'subscribers': {},
+    'drip_enabled': True,
     'custom_image': '',
     'custom_games': [
         {'name': 'Golden Empire 1000', 'rtp': 99.20},
@@ -92,6 +109,11 @@ DEFAULT = {
         {'name': 'Mental 2', 'rtp': 97.05},
     ],
 }
+
+
+def now_ts():
+    return int(time.time())
+
 
 def load_data():
     # deepcopy: DEFAULT holds lists/dicts, a shallow copy would let runtime changes leak into it.
@@ -106,9 +128,17 @@ def load_data():
             logging.error('Data file has unexpected format, using defaults')
     except (json.JSONDecodeError, OSError):
         logging.exception('Unable to read data file')
+    if isinstance(data['subscribers'], list):  # older format: plain list of ids
+        data['subscribers'] = {str(uid): new_sub() for uid in data['subscribers']}
     return data
 
+
+def new_sub():
+    return {'joined': now_ts(), 'step': 0, 'next_at': now_ts() + DRIP_DELAYS[0], 'fails': 0}
+
+
 state = load_data()
+
 
 def save():
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -116,8 +146,22 @@ def save():
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
     tmp.replace(DATA_FILE)
 
+
 def is_admin(message: Message):
     return bool(message.from_user and message.from_user.id in ADMIN_IDS and message.chat.type == 'private')
+
+
+def subscribe(user_id):
+    key = str(user_id)
+    if key not in state['subscribers']:
+        state['subscribers'][key] = new_sub()
+        save()
+
+
+def unsubscribe(user_id, persist=True):
+    if state['subscribers'].pop(str(user_id), None) is not None and persist:
+        save()
+
 
 def progress(rtp):
     # Decorative scale, NOT a mathematical transformation of RTP.
@@ -129,6 +173,7 @@ def progress(rtp):
         return '🟩' * 6 + '🟨' + '⬜️' * 3
     return '🟩' * 5 + '🟥' + '⬜️' * 4
 
+
 def format_caption(games):
     icons = ('🥇', '🥈', '🥉')
     sections = []
@@ -139,28 +184,35 @@ def format_caption(games):
                         f'🚀 {progress(float(rtp))}')
     return '\n\n'.join(sections)
 
+
 def keyboard():
     # A plain URL button with a t.me Mini App link (https://t.me/<bot>/<app>[?startapp=...]).
-    # web_app buttons do NOT work in channel posts, a direct Mini App link does.
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text=BUTTON_TEXT, url=MINIAPP_URL)
     ]])
 
-def resolve_selection(text):
-    """Accept a 1-based preset index or 'custom'; default is next rotation preset."""
+
+def preset_selection(idx):
+    preset = PRESETS[idx]
+    return (idx, preset['games'], str(ASSETS / preset['image']))
+
+
+def resolve_selection(text, allow_empty=True):
+    """Accept a 1-based preset index or 'custom'. Empty means post 1 (only for previews)."""
     arg = text.strip().lower()
     if arg == 'custom':
         return ('custom', state['custom_games'], state['custom_image'])
-    if arg:
-        if not arg.isdigit():
-            raise ValueError(f'Укажи номер от 1 до {len(PRESETS)} или custom')
-        idx = int(arg) - 1
-        if not 0 <= idx < len(PRESETS):
-            raise ValueError(f'Номер должен быть от 1 до {len(PRESETS)}')
-    else:
-        idx = state['next_index'] % len(PRESETS)
-    preset = PRESETS[idx]
-    return (idx, preset['games'], str(ASSETS / preset['image']))
+    if not arg:
+        if not allow_empty:
+            raise ValueError('Укажи номер поста или custom, например: /publish 9')
+        return preset_selection(0)
+    if not arg.isdigit():
+        raise ValueError(f'Укажи номер от 1 до {len(PRESETS)} или custom')
+    idx = int(arg) - 1
+    if not 0 <= idx < len(PRESETS):
+        raise ValueError(f'Номер должен быть от 1 до {len(PRESETS)}')
+    return preset_selection(idx)
+
 
 def local_file(img):
     try:
@@ -168,9 +220,10 @@ def local_file(img):
     except (OSError, ValueError):  # file_id / long URL can't be a path
         return False
 
+
 photo_cache = {}  # banner -> Telegram file_id, so each banner is uploaded once, not once per subscriber
-broadcast_lock = asyncio.Lock()
-BROADCAST_DELAY = 0.05  # ~20 msgs/sec, safely below Telegram's ~30/sec limit
+send_lock = asyncio.Lock()  # one sending run at a time, keeps us under Telegram's rate limit
+
 
 async def send_post(bot, chat_id, selection):
     _, games, img = selection
@@ -184,58 +237,84 @@ async def send_post(bot, chat_id, selection):
         return msg
     return await bot.send_message(chat_id, caption, parse_mode='HTML', reply_markup=keyboard())
 
-def advance(selection):
-    if isinstance(selection[0], int):
-        state['next_index'] = (selection[0] + 1) % len(PRESETS)
-        save()
 
-def subscribe(user_id):
-    if user_id not in state['subscribers']:
-        state['subscribers'].append(user_id)
-        save()
+async def safe_send(bot, user_id, selection):
+    """Returns 'ok', 'gone' (blocked the bot / chat missing) or 'error'."""
+    try:
+        try:
+            await send_post(bot, user_id, selection)
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(exc.retry_after + 1)
+            await send_post(bot, user_id, selection)
+        return 'ok'
+    except TelegramForbiddenError:
+        return 'gone'
+    except TelegramBadRequest as exc:
+        if 'chat not found' in str(exc).lower():
+            return 'gone'
+        logging.error('Send to %s failed: %s', user_id, exc)
+        return 'error'
+    except Exception:
+        logging.exception('Send to %s failed', user_id)
+        return 'error'
 
-def unsubscribe(user_id):
-    if user_id in state['subscribers']:
-        state['subscribers'].remove(user_id)
-        save()
 
 async def broadcast(bot, selection):
-    """Push one post to every subscriber. Returns (sent, gone, failed)."""
-    async with broadcast_lock:
+    """Manual push of one post to every subscriber. Returns (sent, gone, failed)."""
+    async with send_lock:
         sent = gone = failed = streak = 0
-        for uid in list(state['subscribers']):
-            try:
-                try:
-                    await send_post(bot, uid, selection)
-                except TelegramRetryAfter as exc:
-                    await asyncio.sleep(exc.retry_after + 1)
-                    await send_post(bot, uid, selection)
+        for key in list(state['subscribers']):
+            result = await safe_send(bot, int(key), selection)
+            if result == 'ok':
                 sent += 1
                 streak = 0
-            except TelegramForbiddenError:  # user blocked the bot / account deleted
-                unsubscribe(uid)
+            elif result == 'gone':
+                unsubscribe(key, persist=False)
                 gone += 1
-            except TelegramBadRequest as exc:
-                if 'chat not found' in str(exc).lower():
-                    unsubscribe(uid)
-                    gone += 1
-                else:
-                    failed += 1
-                    streak += 1
-                    logging.error('Send to %s failed: %s', uid, exc)
-            except Exception:
+            else:
                 failed += 1
                 streak += 1
-                logging.exception('Send to %s failed', uid)
             if streak >= 5:  # same error for everyone (bad banner / URL) -> stop instead of spamming logs
                 logging.error('Broadcast aborted after %s consecutive errors', streak)
                 break
             await asyncio.sleep(BROADCAST_DELAY)
-        if sent:
-            advance(selection)
+        save()
         return sent, gone, failed
 
+
+async def drip_tick(bot):
+    """Send the next post to every subscriber whose personal timer has expired."""
+    if not state['drip_enabled']:
+        return
+    now = now_ts()
+    due = [k for k, v in state['subscribers'].items() if v.get('next_at') and v['next_at'] <= now]
+    if not due:
+        return
+    async with send_lock:
+        for key in due:
+            sub = state['subscribers'].get(key)
+            if not sub:
+                continue
+            step = sub['step']
+            result = await safe_send(bot, int(key), preset_selection(step % len(PRESETS)))
+            if result == 'gone':
+                state['subscribers'].pop(key, None)
+            elif result == 'ok' or sub.get('fails', 0) + 1 >= MAX_FAILS:
+                # success, or too many failures: move on to the next post
+                step += 1
+                sub['step'] = step
+                sub['fails'] = 0
+                # next gap counts from the moment this push went out; no catch-up if we were offline
+                sub['next_at'] = now_ts() + DRIP_DELAYS[step] if step < len(DRIP_DELAYS) else None
+            else:
+                sub['fails'] = sub.get('fails', 0) + 1
+                sub['next_at'] = now_ts() + RETRY_SECONDS
+            await asyncio.sleep(BROADCAST_DELAY)
+        save()
+
+
 dp = Dispatcher()
+
 
 @dp.message(CommandStart())
 async def start(message: Message):
@@ -246,18 +325,17 @@ async def start(message: Message):
     if not is_admin(message):
         return
     await message.answer(
-        '🎰 Управление рассылкой (ты тоже подписан, посты придут и тебе)\n\n'
+        '🎰 Управление (ты тоже подписан и получаешь цепочку как пользователь)\n\n'
         '/posts — все 11 готовых баннеров\n'
-        '/preview — предпросмотр следующего (только тебе)\n'
-        '/preview 11 — предпросмотр №11\n'
-        '/publish — разослать следующий ВСЕМ подписчикам и перейти к следующему\n'
-        '/publish 11 — разослать №11\n'
+        '/preview 9 — показать пост №9 только тебе (без номера — №1)\n'
+        '/publish 9 — разово разослать пост №9 ВСЕМ подписчикам\n'
         '/setgames — настроить свои 3 игры\n'
         '/setimage — установить своё изображение\n'
-        '/preview custom — посмотреть свой пост\n'
-        '/publish custom — разослать свой пост\n'
-        '/autoon и /autooff — включить/выключить расписание\n'
-        '/status — настройки и число подписчиков')
+        '/preview custom, /publish custom — свой пост\n'
+        '/dripon и /dripoff — включить/приостановить цепочку у всех\n'
+        '/dripnow — проверить цепочку на себе: следующий пуш придёт сразу\n'
+        '/status — подписчики и расписание цепочки')
+
 
 @dp.message(Command('stop'))
 async def stop(message: Message):
@@ -265,6 +343,7 @@ async def stop(message: Message):
         return
     unsubscribe(message.from_user.id)
     await message.answer(STOP_TEXT)
+
 
 @dp.my_chat_member()
 async def on_member_update(event: ChatMemberUpdated):
@@ -276,11 +355,13 @@ async def on_member_update(event: ChatMemberUpdated):
     elif event.new_chat_member.status == 'member':
         subscribe(event.chat.id)
 
+
 @dp.message(Command('posts'))
 async def posts(message: Message):
     if not is_admin(message): return
-    lines = [f'{i}. ' + ', '.join(g[0] for g in p['games']) for i,p in enumerate(PRESETS, 1)]
+    lines = [f'{i}. ' + ', '.join(g[0] for g in p['games']) for i, p in enumerate(PRESETS, 1)]
     await message.answer(f'Готовые публикации ({len(PRESETS)} постов):\n\n' + '\n'.join(lines))
+
 
 @dp.message(Command('preview', 'publish'))
 async def preview_or_publish(message: Message, bot: Bot):
@@ -288,17 +369,17 @@ async def preview_or_publish(message: Message, bot: Bot):
     args = (message.text or '').partition(' ')[2].strip()
     cmd = message.text.split()[0].split('@')[0].lower()
     try:
-        selection = resolve_selection(args)
         if cmd == '/preview':
-            await send_post(bot, message.chat.id, selection)
+            await send_post(bot, message.chat.id, resolve_selection(args))
         else:
-            total = len(state['subscribers'])
-            await message.answer(f'📤 Рассылка запущена, подписчиков: {total}')
+            selection = resolve_selection(args, allow_empty=False)
+            await message.answer(f'📤 Рассылка запущена, подписчиков: {len(state["subscribers"])}')
             sent, gone, failed = await broadcast(bot, selection)
             await message.answer(f'✅ Доставлено: {sent}\nОтписались/заблокировали бота: {gone}\nОшибок: {failed}')
     except Exception as exc:
         logging.exception('Publish / preview failed')
         await message.answer('Ошибка: ' + str(exc)[:400])
+
 
 @dp.message(Command('setgames'))
 async def setgames(message: Message):
@@ -326,6 +407,7 @@ async def setgames(message: Message):
     except ValueError as exc:
         await message.answer('Ошибка: ' + str(exc))
 
+
 @dp.message(Command('setimage'))
 async def setimage(message: Message):
     if not is_admin(message): return
@@ -340,6 +422,7 @@ async def setimage(message: Message):
     else:
         await message.answer('Пришли картинку как фото с подписью /setimage. Она будет использована для /preview custom и /publish custom.')
 
+
 @dp.message(F.photo)
 async def photo_handler(message: Message):
     if not is_admin(message): return
@@ -348,39 +431,55 @@ async def photo_handler(message: Message):
         save()
         await message.answer('✅ Изображение сохранено. /preview custom')
 
-@dp.message(Command('autoon', 'autooff'))
-async def auto_handler(message: Message):
+
+@dp.message(Command('dripon', 'dripoff'))
+async def drip_toggle(message: Message):
     if not is_admin(message): return
-    state['auto'] = message.text.split()[0].split('@')[0].lower() == '/autoon'
+    state['drip_enabled'] = message.text.split()[0].split('@')[0].lower() == '/dripon'
     save()
-    await message.answer(('✅ Авторассылка активна: ' + ', '.join(POST_TIMES) + f' ({TZ.key})') if state['auto'] else '⏸ Авторассылка отключена')
+    await message.answer('✅ Цепочка включена' if state['drip_enabled']
+                         else '⏸ Цепочка на паузе у всех (таймеры продолжат идти, просроченные пуши уйдут после /dripon)')
+
+
+@dp.message(Command('dripnow'))
+async def drip_now(message: Message):
+    if not is_admin(message): return
+    subscribe(message.from_user.id)
+    sub = state['subscribers'][str(message.from_user.id)]
+    if sub['step'] >= len(DRIP_DELAYS):
+        sub['step'] = 0  # chain finished: restart it on the admin for testing
+    sub['next_at'] = now_ts()
+    save()
+    await message.answer(f'Следующий пуш (№{sub["step"] % len(PRESETS) + 1}) придёт в течение ~{TICK_SECONDS} сек.')
+
 
 @dp.message(Command('status'))
 async def status(message: Message):
     if not is_admin(message): return
-    await message.answer(f'Подписчиков: {len(state["subscribers"])}\nКнопка → {MINIAPP_URL}\nАвторассылка: {"ON" if state["auto"] else "OFF"}\n'
-                         f'Часы: {", ".join(POST_TIMES)} ({TZ.key})\n'
-                         f'Следующий баннер: {state["next_index"] % len(PRESETS) + 1}\n'
+    subs = state['subscribers']
+    waiting = [v['next_at'] for v in subs.values() if v.get('next_at')]
+    done = sum(1 for v in subs.values() if not v.get('next_at'))
+    nxt = f'{human(min(waiting) - now_ts())}' if waiting else '—'
+    plan = ' → '.join(human(d) for d in DRIP_DELAYS)
+    await message.answer(f'Подписчиков: {len(subs)} (в цепочке: {len(waiting)}, прошли все пуши: {done})\n'
+                         f'Цепочка: {"ON" if state["drip_enabled"] else "OFF (пауза)"}\n'
+                         f'Ближайший пуш через: {nxt}\n'
+                         f'Паузы: {plan}\n'
+                         f'Кнопка → {MINIAPP_URL}\n'
                          f'Собственная картинка: {"да" if state["custom_image"] else "нет"}')
+
 
 async def scheduler(bot: Bot):
     while True:
         try:
-            now = datetime.now(TZ)
-            key = now.strftime('%Y-%m-%d %H:%M')
-            if state['auto'] and now.strftime('%H:%M') in POST_TIMES and key not in state['posted_minutes']:
-                # Persist timestamp before send; prevents duplicate spam on crash / restart.
-                state['posted_minutes'].append(key)
-                state['posted_minutes'] = state['posted_minutes'][-60:]
-                save()
-                sent, gone, failed = await broadcast(bot, resolve_selection(''))
-                logging.info('Scheduled broadcast %s: sent=%s gone=%s failed=%s', key, sent, gone, failed)
+            await drip_tick(bot)
         except asyncio.CancelledError:
             raise
         except Exception:
             # Never let the scheduler die silently (e.g. disk error or Telegram error).
-            logging.exception('Scheduled broadcast failed')
-        await asyncio.sleep(15)
+            logging.exception('Drip tick failed')
+        await asyncio.sleep(TICK_SECONDS)
+
 
 async def main():
     if not ADMIN_IDS: raise RuntimeError('ADMIN_IDS must not be empty')
@@ -395,6 +494,7 @@ async def main():
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
 
 if __name__ == '__main__':
     asyncio.run(main())
